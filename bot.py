@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация из переменных окружения
 TOKEN = os.environ.get('BOT_TOKEN', '8255905138:AAG6jeN13ZuAH3zUrSJWHVGFLE9pmpTLFd8')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', '7607383500'))
+ADMIN_ID = 7607383500  # Твой ID админа
 MANAGER_USERNAME = '@Manager_molochniyshop'
 ADMIN_PASSWORD = "шуруп_спасибо_за_шавуху"
 
@@ -24,21 +24,29 @@ bot = telebot.TeleBot(TOKEN)
 # Сдельная система оплаты
 PIECE_RATE_SYSTEM = {
     'pr_manager': {
-        'rate_per_view': 5,       # руб за 1000 просмотров
-        'rate_per_client': 500,   # руб за привлеченного клиента
-        'bonus_threshold': 10     # бонус за 10+ клиентов
+        'rate_per_view': 5,
+        'rate_per_client': 500,
+        'bonus_threshold': 10
     },
     'poster': {
-        'rate_per_post': 300,     # руб за пост
-        'rate_per_engagement': 50, # руб за 100 вовлечений
-        'quality_bonus': 200      # бонус за качественный контент
+        'rate_per_post': 300,
+        'rate_per_engagement': 50,
+        'quality_bonus': 200
     },
     'gamer': {
-        'rate_per_escort': 1000,  # руб за сопровод
-        'rate_per_review': 200,   # бонус за отзыв
-        'safety_bonus': 300       # бонус за безопасность
+        'rate_per_escort': 1000,
+        'rate_per_review': 200,
+        'safety_bonus': 300
     }
 }
+
+# Безопасная отправка сообщений
+def safe_send_message(chat_id, text, **kwargs):
+    try:
+        return bot.send_message(chat_id, text, **kwargs)
+    except Exception as e:
+        logger.error(f"Ошибка отправки сообщения {chat_id}: {e}")
+        return None
 
 # Инициализация базы данных
 def init_db():
@@ -62,7 +70,8 @@ def init_db():
                 skills TEXT DEFAULT 'Не указаны',
                 last_payment_date TEXT,
                 performance_rating REAL DEFAULT 5.0,
-                contact_info TEXT DEFAULT 'Не указано'
+                contact_info TEXT DEFAULT 'Не указано',
+                is_admin INTEGER DEFAULT 0
             )
         ''')
         
@@ -82,7 +91,7 @@ def init_db():
             )
         ''')
         
-        # Таблица транзакций (сдельная оплата)
+        # Таблица транзакций
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,28 +134,14 @@ def init_db():
             )
         ''')
         
-        # Таблица настроек
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS bot_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        ''')
-        
-        # Настройки по умолчанию
-        cursor.execute('''
-            INSERT OR IGNORE INTO bot_settings (key, value) 
-            VALUES 
-            ('welcome_message', '🎉 Добро пожаловать в MOLOCHNIY BOTIK!'),
-            ('main_text', '🍞 *Привет! Влетаем в сферу метро шопа буквально с двух ног* 🍞\\n\\n*Что мы вам гарантируем?*\\n• Достаточно низкие цены ✅\\n• Приятные, общительные, смешные и успешные сопроводы ✅\\n\\n*Самое главное для нас это чтобы наши покупатели были довольны* 🤗'),
-            ('contact_manager_text', '💬 *Связь с менеджером*\\n\\nПо всем вопросам обращайтесь к нашему менеджеру - он всегда на связи и готов помочь!')
-        ''')
+        # Добавляем текущего админа в базу
+        cursor.execute('INSERT OR IGNORE INTO users (user_id, is_admin, role) VALUES (?, 1, "admin")', (ADMIN_ID,))
         
         conn.commit()
-        logger.info("✅ База данных успешно инициализирована")
+        logger.info("База данных успешно инициализирована")
         return conn
     except Exception as e:
-        logger.error(f"❌ Ошибка инициализации БД: {e}")
+        logger.error(f"Ошибка инициализации БД: {e}")
         return None
 
 # Инициализация БД
@@ -154,7 +149,6 @@ db_connection = init_db()
 
 # Словари сессий
 user_sessions = {}
-admin_sessions = {}
 
 class UserSession:
     def __init__(self, user_id):
@@ -187,6 +181,15 @@ def get_session(user_id):
         user_sessions[user_id] = UserSession(user_id)
     return user_sessions[user_id]
 
+def is_admin(user_id):
+    try:
+        cursor = db_connection.cursor()
+        cursor.execute('SELECT is_admin FROM users WHERE user_id = ?', (user_id,))
+        result = cursor.fetchone()
+        return result and result[0] == 1
+    except:
+        return False
+
 # Очистка сессий
 def cleanup_sessions():
     try:
@@ -198,9 +201,8 @@ def cleanup_sessions():
         
         for user_id in expired_sessions:
             del user_sessions[user_id]
-        logger.info(f"🧹 Очищено {len(expired_sessions)} сессий")
     except Exception as e:
-        logger.error(f"❌ Ошибка очистки сессий: {e}")
+        logger.error(f"Ошибка очистки сессий: {e}")
 
 def schedule_cleanup():
     schedule.every(1).hours.do(cleanup_sessions)
@@ -209,31 +211,17 @@ def schedule_cleanup():
             schedule.run_pending()
             time.sleep(1)
         except Exception as e:
-            logger.error(f"❌ Ошибка в schedule: {e}")
             time.sleep(60)
 
 cleanup_thread = threading.Thread(target=schedule_cleanup, daemon=True)
 cleanup_thread.start()
 
 # Вспомогательные функции
-def get_bot_setting(key, default=None):
+def safe_notify_admin(message):
     try:
-        cursor = db_connection.cursor()
-        cursor.execute('SELECT value FROM bot_settings WHERE key = ?', (key,))
-        result = cursor.fetchone()
-        return result[0] if result else default
+        safe_send_message(ADMIN_ID, message, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка получения настройки {key}: {e}")
-        return default
-
-def add_contact_manager_button(markup):
-    try:
-        contact_btn = types.InlineKeyboardButton("💬 Связаться с менеджером", url=f"https://t.me/{MANAGER_USERNAME[1:]}")
-        markup.add(contact_btn)
-        return markup
-    except Exception as e:
-        logger.error(f"❌ Ошибка добавления кнопки менеджера: {e}")
-        return markup
+        logger.error(f"Ошибка уведомления админа: {e}")
 
 # Обработчик команды /start
 @bot.message_handler(commands=['start'])
@@ -265,18 +253,15 @@ def start_command(message):
             # Уведомление админу
             try:
                 ref_info = f" по реферальной ссылке от {referral_id}" if referral_id else " без реферальной ссылки"
-                bot.send_message(ADMIN_ID, f"🆕 Новый пользователь: @{username or 'без username'} (ID: {user_id}){ref_info}")
+                safe_notify_admin(f"Новый пользователь: @{username or 'без username'} (ID: {user_id}){ref_info}")
             except Exception as e:
-                logger.error(f"❌ Ошибка отправки уведомления админу: {e}")
+                logger.error(f"Ошибка отправки уведомления админу: {e}")
         
         # Проверка "Я не робот"
         show_verification(user_id)
     except Exception as e:
-        logger.error(f"❌ Ошибка в start_command: {e}")
-        try:
-            bot.send_message(message.chat.id, "❌ Произошла ошибка. Попробуйте позже.")
-        except:
-            pass
+        logger.error(f"Ошибка в start_command: {e}")
+        safe_send_message(message.chat.id, "Произошла ошибка. Попробуйте позже.")
 
 def show_verification(user_id):
     try:
@@ -284,10 +269,9 @@ def show_verification(user_id):
         verify_button = types.InlineKeyboardButton("✅ Я не робот", callback_data="not_robot")
         markup.add(verify_button)
         
-        welcome_msg = get_bot_setting('welcome_message', 'Добро пожаловать в MOLOCHNIY BOTIK!')
-        bot.send_message(user_id, f"{welcome_msg}\n\nДля продолжения подтвердите, что вы не робот:", reply_markup=markup)
+        safe_send_message(user_id, "🎉 Добро пожаловать в MOLOCHNIY BOTIK!\n\nДля продолжения подтвердите, что вы не робот:", reply_markup=markup)
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_verification: {e}")
+        logger.error(f"Ошибка в show_verification: {e}")
 
 # Обработчик callback'ов
 @bot.callback_query_handler(func=lambda call: True)
@@ -326,13 +310,20 @@ def callback_handler(call):
             handle_salary_callback(call)
         elif call.data == "my_applications":
             show_my_applications(user_id)
+        elif call.data == "admin_panel":
+            if is_admin(user_id):
+                show_admin_panel(user_id)
+            else:
+                bot.answer_callback_query(call.id, "У вас нет прав доступа")
+        elif call.data == "transfer_admin":
+            start_transfer_admin(user_id)
         else:
-            logger.warning(f"⚠️ Неизвестный callback: {call.data}")
+            logger.warning(f"Неизвестный callback: {call.data}")
             
     except Exception as e:
-        logger.error(f"❌ Ошибка в callback_handler: {e}")
+        logger.error(f"Ошибка в callback_handler: {e}")
         try:
-            bot.answer_callback_query(call.id, "❌ Произошла ошибка")
+            bot.answer_callback_query(call.id, "Произошла ошибка")
         except:
             pass
 
@@ -356,17 +347,17 @@ def handle_verification(call):
         time.sleep(2)
         show_main_menu(user_id)
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_verification: {e}")
+        logger.error(f"Ошибка в handle_verification: {e}")
 
 def show_main_menu(user_id, message_id=None):
     try:
-        main_text = get_bot_setting('main_text', """🍞 *Привет! Влетаем в сферу метро шопа буквально с двух ног* 🍞
+        main_text = """🍞 *Привет! Влетаем в сферу метро шопа буквально с двух ног* 🍞
 
 *Что мы вам гарантируем?*
 • Достаточно низкие цены ✅
 • Приятные, общительные, смешные и успешные сопроводы ✅
 
-*Самое главное для нас это чтобы наши покупатели были довольны* 🤗""")
+*Самое главное для нас это чтобы наши покупатели были довольны* 🤗"""
 
         markup = types.InlineKeyboardMarkup(row_width=1)
         
@@ -376,14 +367,19 @@ def show_main_menu(user_id, message_id=None):
         profile_btn = types.InlineKeyboardButton("👤 Мой профиль", callback_data="profile")
         contact_btn = types.InlineKeyboardButton("💬 Связаться с менеджером", callback_data="contact_manager")
         
+        # Добавляем кнопку админ-панели для админа
+        if is_admin(user_id):
+            admin_btn = types.InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")
+            markup.add(admin_btn)
+        
         markup.add(metro_shop_btn, manager_btn, escort_btn, profile_btn, contact_btn)
         
         if message_id:
             bot.edit_message_text(chat_id=user_id, message_id=message_id, text=main_text, reply_markup=markup, parse_mode="Markdown")
         else:
-            bot.send_message(user_id, main_text, reply_markup=markup, parse_mode="Markdown")
+            safe_send_message(user_id, main_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_main_menu: {e}")
+        logger.error(f"Ошибка в show_main_menu: {e}")
 
 def show_metro_shop(user_id, message_id=None):
     try:
@@ -401,15 +397,15 @@ def show_metro_shop(user_id, message_id=None):
         if message_id:
             bot.edit_message_text(chat_id=user_id, message_id=message_id, text=text, reply_markup=markup, parse_mode="Markdown")
         else:
-            bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
+            safe_send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_metro_shop: {e}")
+        logger.error(f"Ошибка в show_metro_shop: {e}")
 
 def show_manager_contact(user_id, message_id=None):
     try:
-        contact_text = get_bot_setting('contact_manager_text', """💬 *Связь с менеджером*
+        contact_text = """💬 *Связь с менеджером*
 
-По всем вопросам обращайтесь к нашему менеджеру - он всегда на связи и готов помочь!""")
+По всем вопросам обращайтесь к нашему менеджеру - он всегда на связи и готов помочь!"""
 
         markup = types.InlineKeyboardMarkup()
         manager_button = types.InlineKeyboardButton("💬 Написать менеджеру", url=f"https://t.me/{MANAGER_USERNAME[1:]}")
@@ -421,9 +417,9 @@ def show_manager_contact(user_id, message_id=None):
         if message_id:
             bot.edit_message_text(chat_id=user_id, message_id=message_id, text=contact_text, reply_markup=markup, parse_mode="Markdown")
         else:
-            bot.send_message(user_id, contact_text, reply_markup=markup, parse_mode="Markdown")
+            safe_send_message(user_id, contact_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_manager_contact: {e}")
+        logger.error(f"Ошибка в show_manager_contact: {e}")
 
 def show_vacancies(user_id, message_id=None):
     try:
@@ -461,9 +457,9 @@ def show_vacancies(user_id, message_id=None):
         if message_id:
             bot.edit_message_text(chat_id=user_id, message_id=message_id, text=vacancies_text, reply_markup=markup, parse_mode="Markdown")
         else:
-            bot.send_message(user_id, vacancies_text, reply_markup=markup, parse_mode="Markdown")
+            safe_send_message(user_id, vacancies_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_vacancies: {e}")
+        logger.error(f"Ошибка в show_vacancies: {e}")
 
 def handle_vacancy_selection(call):
     try:
@@ -480,7 +476,7 @@ def handle_vacancy_selection(call):
         session.set_state('APPLYING_FOR_JOB', {'vacancy': vacancy})
         start_job_application(user_id)
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_vacancy_selection: {e}")
+        logger.error(f"Ошибка в handle_vacancy_selection: {e}")
 
 def start_job_application(user_id):
     try:
@@ -489,14 +485,9 @@ def start_job_application(user_id):
         
         session.set_state('APPLYING_EXPERIENCE', {'vacancy': vacancy})
         
-        bot.send_message(user_id, f"📝 *Подача заявки на вакансию: {vacancy}*\n\n"
-                                 "Расскажите о своем опыте работы:\n"
-                                 "- Где работали раньше?\n" 
-                                 "- Какой у вас стаж?\n"
-                                 "- Каких результатов достигли?",
-                         parse_mode="Markdown")
+        safe_send_message(user_id, f"📝 *Подача заявки на вакансию: {vacancy}*\n\nРасскажите о своем опыте работы:\n- Где работали раньше?\n- Какой у вас стаж?\n- Каких результатов достигли?", parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в start_job_application: {e}")
+        logger.error(f"Ошибка в start_job_application: {e}")
 
 # Обработчик команды /profile
 @bot.message_handler(commands=['profile'])
@@ -505,20 +496,20 @@ def profile_command(message):
         user_id = message.chat.id
         show_user_profile(user_id)
     except Exception as e:
-        logger.error(f"❌ Ошибка в profile_command: {e}")
+        logger.error(f"Ошибка в profile_command: {e}")
 
 def show_user_profile(user_id):
     try:
         cursor = db_connection.cursor()
         cursor.execute('''
             SELECT username, first_name, last_name, role, registration_date, 
-                   total_earned, experience, skills, performance_rating, contact_info
+                   total_earned, experience, skills, performance_rating, contact_info, is_admin
             FROM users WHERE user_id = ?
         ''', (user_id,))
         user_data = cursor.fetchone()
         
         if user_data:
-            username, first_name, last_name, role, reg_date, total_earned, experience, skills, rating, contact_info = user_data
+            username, first_name, last_name, role, reg_date, total_earned, experience, skills, rating, contact_info, is_admin_flag = user_data
             
             profile_text = f"""👤 *Ваш профиль*
 
@@ -528,12 +519,13 @@ def show_user_profile(user_id):
 *Дата регистрации:* {reg_date}
 *Рейтинг:* {rating or '5'}/5 ⭐"""
 
+            if is_admin_flag:
+                profile_text += "\n*Статус:* 👑 Администратор"
+
             if role != 'user':
                 profile_text += f"\n*Всего заработано:* {total_earned or 0:,}₽"
                 profile_text += f"\n*Опыт:* {experience}"
                 profile_text += f"\n*Навыки:* {skills}"
-                if contact_info and contact_info != 'Не указано':
-                    profile_text += f"\n*Контакты:* {contact_info}"
 
             markup = types.InlineKeyboardMarkup(row_width=2)
             
@@ -543,17 +535,21 @@ def show_user_profile(user_id):
                 applications_btn = types.InlineKeyboardButton("📋 Мои заявки", callback_data="my_applications")
                 markup.add(earnings_btn, reviews_btn, applications_btn)
             
+            if is_admin_flag:
+                admin_btn = types.InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")
+                markup.add(admin_btn)
+            
             leave_review_btn = types.InlineKeyboardButton("📝 Оставить отзыв", callback_data="leave_review")
             contact_btn = types.InlineKeyboardButton("💬 Связаться с менеджером", callback_data="contact_manager")
             back_btn = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")
             
             markup.add(leave_review_btn, contact_btn, back_btn)
             
-            bot.send_message(user_id, profile_text, reply_markup=markup, parse_mode="Markdown")
+            safe_send_message(user_id, profile_text, reply_markup=markup, parse_mode="Markdown")
         else:
-            bot.send_message(user_id, "❌ Профиль не найден.")
+            safe_send_message(user_id, "Профиль не найден.")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_user_profile: {e}")
+        logger.error(f"Ошибка в show_user_profile: {e}")
 
 def show_my_earnings(user_id):
     try:
@@ -562,7 +558,7 @@ def show_my_earnings(user_id):
         user_data = cursor.fetchone()
         
         if not user_data or user_data[0] == 'user':
-            bot.send_message(user_id, "❌ У вас нет доступа к этой функции.")
+            safe_send_message(user_id, "У вас нет доступа к этой функции.")
             return
         
         role, total_earned = user_data
@@ -608,9 +604,9 @@ def show_my_earnings(user_id):
         back_btn = types.InlineKeyboardButton("🔙 Назад", callback_data="profile")
         markup.add(contact_btn, back_btn)
         
-        bot.send_message(user_id, earnings_text, parse_mode="Markdown", reply_markup=markup)
+        safe_send_message(user_id, earnings_text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_my_earnings: {e}")
+        logger.error(f"Ошибка в show_my_earnings: {e}")
 
 def show_my_applications(user_id):
     try:
@@ -624,7 +620,7 @@ def show_my_applications(user_id):
         applications = cursor.fetchall()
         
         if not applications:
-            bot.send_message(user_id, "📭 У вас нет поданых заявок.")
+            safe_send_message(user_id, "У вас нет поданых заявок.")
             return
         
         apps_text = "📋 *Ваши заявки*\n\n"
@@ -637,9 +633,9 @@ def show_my_applications(user_id):
         back_btn = types.InlineKeyboardButton("🔙 Назад", callback_data="profile")
         markup.add(back_btn)
         
-        bot.send_message(user_id, apps_text, parse_mode="Markdown", reply_markup=markup)
+        safe_send_message(user_id, apps_text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_my_applications: {e}")
+        logger.error(f"Ошибка в show_my_applications: {e}")
 
 def show_my_reviews(user_id):
     try:
@@ -675,9 +671,9 @@ def show_my_reviews(user_id):
         back_btn = types.InlineKeyboardButton("🔙 Назад", callback_data="profile")
         markup.add(back_btn)
         
-        bot.send_message(user_id, reviews_text, parse_mode="Markdown", reply_markup=markup)
+        safe_send_message(user_id, reviews_text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_my_reviews: {e}")
+        logger.error(f"Ошибка в show_my_reviews: {e}")
 
 def start_review_process(user_id):
     try:
@@ -695,7 +691,7 @@ def start_review_process(user_id):
         employees = cursor.fetchall()
         
         if not employees:
-            bot.send_message(user_id, "❌ В системе пока нет сотрудников для отзыва.")
+            safe_send_message(user_id, "В системе пока нет сотрудников для отзыва.")
             return
         
         review_text = "👥 *Выберите сотрудника для отзыва:*\n\n"
@@ -709,9 +705,9 @@ def start_review_process(user_id):
         back_btn = types.InlineKeyboardButton("🔙 Назад", callback_data="profile")
         markup.add(back_btn)
         
-        bot.send_message(user_id, review_text, reply_markup=markup, parse_mode="Markdown")
+        safe_send_message(user_id, review_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в start_review_process: {e}")
+        logger.error(f"Ошибка в start_review_process: {e}")
 
 def handle_review_callback(call):
     try:
@@ -741,7 +737,7 @@ def handle_review_callback(call):
                                  text="📝 *Напишите комментарий к отзыву:*\n\nОпишите ваше впечатление о работе сотрудника:",
                                  parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_review_callback: {e}")
+        logger.error(f"Ошибка в handle_review_callback: {e}")
 
 # Обработчик текстовых сообщений
 @bot.message_handler(func=lambda message: True)
@@ -754,40 +750,64 @@ def handle_messages(message):
         # Обработка пароля для админки
         if session.state == 'WAITING_ADMIN_PASSWORD':
             if text == ADMIN_PASSWORD:
-                session.clear()
-                admin_sessions[user_id] = True
-                show_admin_panel(user_id)
-            else:
+                # Пароль верный - даем права админа
                 cursor = db_connection.cursor()
-                cursor.execute('UPDATE users SET banned_from_admin = 1 WHERE user_id = ?', (user_id,))
+                cursor.execute('UPDATE users SET is_admin = 1 WHERE user_id = ?', (user_id,))
                 db_connection.commit()
                 session.clear()
-                bot.send_message(user_id, "❌ Неверный пароль! Доступ к админ-панели заблокирован.")
+                safe_send_message(user_id, "✅ Пароль верный! Теперь у вас есть права администратора.")
+                show_admin_panel(user_id)
+            else:
+                session.clear()
+                safe_send_message(user_id, "❌ Неверный пароль!")
             return
         
+        # Передача прав админа
+        elif session.state == 'TRANSFER_ADMIN':
+            try:
+                new_admin_id = int(text)
+                cursor = db_connection.cursor()
+                
+                # Проверяем существование пользователя
+                cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (new_admin_id,))
+                if not cursor.fetchone():
+                    safe_send_message(user_id, "❌ Пользователь с таким ID не найден.")
+                    session.clear()
+                    return
+                
+                # Убираем права у текущего админа
+                cursor.execute('UPDATE users SET is_admin = 0 WHERE user_id = ?', (user_id,))
+                # Даем права новому админу
+                cursor.execute('UPDATE users SET is_admin = 1 WHERE user_id = ?', (new_admin_id,))
+                db_connection.commit()
+                
+                session.clear()
+                safe_send_message(user_id, f"✅ Права администратора успешно переданы пользователю {new_admin_id}!")
+                
+                # Уведомляем нового админа
+                safe_send_message(new_admin_id, "🎉 Вам были предоставлены права администратора бота!")
+                
+            except ValueError:
+                safe_send_message(user_id, "❌ Пожалуйста, введите корректный ID пользователя (только цифры).")
+            except Exception as e:
+                logger.error(f"Ошибка передачи прав: {e}")
+                safe_send_message(user_id, "❌ Произошла ошибка при передаче прав.")
+        
         # Подача заявки на вакансию
-        if session.state == 'APPLYING_EXPERIENCE':
+        elif session.state == 'APPLYING_EXPERIENCE':
             session.update_data(experience=text)
             session.set_state('APPLYING_SKILLS')
-            bot.send_message(user_id, "🛠️ *Расскажите о своих навыках:*\n\n"
-                                     "- Какими программами/инструментами владеете?\n"
-                                     "- Какие у вас есть специальные навыки?",
-                             parse_mode="Markdown")
+            safe_send_message(user_id, "🛠️ *Расскажите о своих навыках:*\n\n- Какими программами/инструментами владеете?\n- Какие у вас есть специальные навыки?", parse_mode="Markdown")
         
         elif session.state == 'APPLYING_SKILLS':
             session.update_data(skills=text)
             session.set_state('APPLYING_ABOUT')
-            bot.send_message(user_id, "👨‍💼 *Расскажите о себе подробнее:*\n\n"
-                                     "- Почему хотите работать именно у нас?\n"
-                                     "- Какие у вас цели?",
-                             parse_mode="Markdown")
+            safe_send_message(user_id, "👨‍💼 *Расскажите о себе подробнее:*\n\n- Почему хотите работать именно у нас?\n- Какие у вас цели?", parse_mode="Markdown")
         
         elif session.state == 'APPLYING_ABOUT':
             session.update_data(about_me=text)
             session.set_state('APPLYING_FINAL')
-            bot.send_message(user_id, "💬 *Напишите заключительное сообщение:*\n\n"
-                                     "- Почему мы должны выбрать именно вас?",
-                             parse_mode="Markdown")
+            safe_send_message(user_id, "💬 *Напишите заключительное сообщение:*\n\n- Почему мы должны выбрать именно вас?", parse_mode="Markdown")
         
         elif session.state == 'APPLYING_FINAL':
             application_text = text
@@ -822,12 +842,12 @@ def handle_messages(message):
 *О себе:* {data['about_me'][:200]}...
 *Заключение:* {application_text[:200]}..."""
 
-                bot.send_message(ADMIN_ID, app_notification, parse_mode="Markdown")
+                safe_notify_admin(app_notification)
             except Exception as e:
-                logger.error(f"❌ Ошибка отправки уведомления: {e}")
+                logger.error(f"Ошибка отправки уведомления: {e}")
             
             session.clear()
-            bot.send_message(user_id, f"✅ Ваша заявка на вакансию *{data['vacancy']}* отправлена! Мы свяжемся с вами.", parse_mode="Markdown")
+            safe_send_message(user_id, f"✅ Ваша заявка на вакансию *{data['vacancy']}* отправлена! Мы свяжемся с вами.", parse_mode="Markdown")
             show_main_menu(user_id)
         
         # Оставление отзыва
@@ -859,12 +879,12 @@ def handle_messages(message):
 *Оценка:* {'⭐' * data['rating']}
 *Комментарий:* {comment}"""
 
-                bot.send_message(ADMIN_ID, review_notification, parse_mode="Markdown")
+                safe_notify_admin(review_notification)
             except Exception as e:
-                logger.error(f"❌ Ошибка отправки уведомления об отзыве: {e}")
+                logger.error(f"Ошибка отправки уведомления об отзыве: {e}")
             
             session.clear()
-            bot.send_message(user_id, "✅ Ваш отзыв сохранен и отправлен на модерацию!", parse_mode="Markdown")
+            safe_send_message(user_id, "✅ Ваш отзыв сохранен и отправлен на модерацию!", parse_mode="Markdown")
             show_main_menu(user_id)
         
         # Обработка админ-команд
@@ -875,7 +895,7 @@ def handle_messages(message):
             show_main_menu(user_id)
             
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_messages: {e}")
+        logger.error(f"Ошибка в handle_messages: {e}")
 
 # АДМИН ПАНЕЛЬ
 @bot.message_handler(commands=['admin'])
@@ -883,28 +903,22 @@ def admin_command(message):
     try:
         user_id = message.chat.id
         
-        if user_id != ADMIN_ID:
-            bot.send_message(user_id, "❌ У вас нет доступа к этой команде.")
-            return
-        
-        # Проверка бана
-        cursor = db_connection.cursor()
-        cursor.execute('SELECT banned_from_admin FROM users WHERE user_id = ?', (user_id,))
-        user_data = cursor.fetchone()
-        
-        if user_data and user_data[0] == 1:
-            bot.send_message(user_id, "❌ Доступ к админ-панели заблокирован.")
-            return
-        
-        # Запрос пароля
-        session = get_session(user_id)
-        session.set_state('WAITING_ADMIN_PASSWORD')
-        bot.send_message(user_id, "🔐 Введите пароль для доступа к админ-панели:")
+        if is_admin(user_id):
+            show_admin_panel(user_id)
+        else:
+            # Запрос пароля
+            session = get_session(user_id)
+            session.set_state('WAITING_ADMIN_PASSWORD')
+            safe_send_message(user_id, "🔐 Введите пароль для доступа к админ-панели:")
     except Exception as e:
-        logger.error(f"❌ Ошибка в admin_command: {e}")
+        logger.error(f"Ошибка в admin_command: {e}")
 
 def show_admin_panel(user_id):
     try:
+        if not is_admin(user_id):
+            safe_send_message(user_id, "❌ У вас нет прав доступа к админ-панели.")
+            return
+            
         admin_text = "👑 *ПАНЕЛЬ АДМИНИСТРАТОРА*\n\n*Выберите раздел для управления:*"
         
         markup = types.InlineKeyboardMarkup(row_width=2)
@@ -915,18 +929,30 @@ def show_admin_panel(user_id):
         salary_btn = types.InlineKeyboardButton("💰 Зарплаты", callback_data="admin_salary")
         stats_btn = types.InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")
         broadcast_btn = types.InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")
+        transfer_btn = types.InlineKeyboardButton("🔄 Передать права", callback_data="transfer_admin")
         
-        markup.add(users_btn, applications_btn, reviews_btn, salary_btn, stats_btn, broadcast_btn)
+        markup.add(users_btn, applications_btn, reviews_btn, salary_btn, stats_btn, broadcast_btn, transfer_btn)
         
-        bot.send_message(user_id, admin_text, reply_markup=markup, parse_mode="Markdown")
+        safe_send_message(user_id, admin_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_admin_panel: {e}")
+        logger.error(f"Ошибка в show_admin_panel: {e}")
+
+def start_transfer_admin(user_id):
+    try:
+        if not is_admin(user_id):
+            return
+            
+        session = get_session(user_id)
+        session.set_state('TRANSFER_ADMIN')
+        safe_send_message(user_id, "🔄 *Передача прав администратора*\n\nВведите ID пользователя, которому хотите передать права администратора:")
+    except Exception as e:
+        logger.error(f"Ошибка в start_transfer_admin: {e}")
 
 def handle_admin_callback(call):
     try:
         user_id = call.message.chat.id
         
-        if user_id not in admin_sessions:
+        if not is_admin(user_id):
             bot.answer_callback_query(call.id, "❌ Нет доступа к админ-панели")
             return
         
@@ -956,30 +982,31 @@ def handle_admin_callback(call):
             review_action = call.data.split("_")[2]
             review_id = int(call.data.split("_")[3])
             handle_review_action(user_id, review_action, review_id)
+        elif call.data == "transfer_admin":
+            start_transfer_admin(user_id)
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_admin_callback: {e}")
+        logger.error(f"Ошибка в handle_admin_callback: {e}")
 
 def handle_salary_callback(call):
     try:
         user_id = call.message.chat.id
-        data = call.data
         
-        if user_id not in admin_sessions:
+        if not is_admin(user_id):
             return
         
-        if data.startswith("salary_pay_"):
-            target_user_id = int(data.split("_")[2])
+        if call.data.startswith("salary_pay_"):
+            target_user_id = int(call.data.split("_")[2])
             session = get_session(user_id)
             session.set_state(f'ADMIN_PAY_SALARY_{target_user_id}')
-            bot.send_message(user_id, f"💸 Введите сумму для выплаты пользователю {target_user_id}:")
+            safe_send_message(user_id, f"💸 Введите сумму для выплаты пользователю {target_user_id}:")
         
-        elif data.startswith("salary_set_"):
-            target_user_id = int(data.split("_")[2])
+        elif call.data.startswith("salary_set_"):
+            target_user_id = int(call.data.split("_")[2])
             session = get_session(user_id)
             session.set_state(f'ADMIN_SET_SALARY_{target_user_id}')
-            bot.send_message(user_id, f"⚙️ Введите новую зарплату для пользователя {target_user_id}:")
+            safe_send_message(user_id, f"⚙️ Введите новую зарплату для пользователя {target_user_id}:")
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_salary_callback: {e}")
+        logger.error(f"Ошибка в handle_salary_callback: {e}")
 
 def handle_admin_text_input(user_id, text, session):
     try:
@@ -1008,18 +1035,10 @@ def handle_admin_text_input(user_id, text, session):
             db_connection.commit()
             
             session.clear()
-            bot.send_message(user_id, f"✅ Выплачено {amount:,}₽ пользователю {target_user_id}")
+            safe_send_message(user_id, f"✅ Выплачено {amount:,}₽ пользователю {target_user_id}")
             
             # Уведомляем пользователя
-            try:
-                bot.send_message(target_user_id, f"🎉 Вам выплачена зарплата в размере {amount:,}₽!\n\nВаш общий заработок: {new_total:,}₽")
-            except:
-                pass
-        
-        elif state.startswith('ADMIN_SET_SALARY_'):
-            # Для сдельной системы это не нужно, но оставим для совместимости
-            session.clear()
-            bot.send_message(user_id, "ℹ️ В сдельной системе зарплата устанавливается автоматически")
+            safe_send_message(target_user_id, f"🎉 Вам выплачена зарплата в размере {amount:,}₽!\n\nВаш общий заработок: {new_total:,}₽")
         
         elif state == 'ADMIN_BROADCAST':
             broadcast_text = text
@@ -1033,30 +1052,30 @@ def handle_admin_text_input(user_id, text, session):
             sent_count = 0
             failed_count = 0
             
-            bot.send_message(user_id, f"📢 Начинаю рассылку для {len(all_users)} пользователей...")
+            safe_send_message(user_id, f"📢 Начинаю рассылку для {len(all_users)} пользователей...")
             
             for user in all_users:
                 try:
                     user_id_db = user[0]
-                    bot.send_message(user_id_db, f"📢 *Сообщение от администратора:*\n\n{broadcast_text}", parse_mode="Markdown")
+                    safe_send_message(user_id_db, f"📢 *Сообщение от администратора:*\n\n{broadcast_text}", parse_mode="Markdown")
                     sent_count += 1
                     time.sleep(0.1)
                 except:
                     failed_count += 1
             
-            bot.send_message(user_id, f"✅ Рассылка завершена!\n\nУспешно: {sent_count}\nНе удалось: {failed_count}")
+            safe_send_message(user_id, f"✅ Рассылка завершена!\n\nУспешно: {sent_count}\nНе удалось: {failed_count}")
     
     except ValueError:
-        bot.send_message(user_id, "❌ Пожалуйста, введите корректную сумму (только цифры)")
+        safe_send_message(user_id, "❌ Пожалуйста, введите корректную сумму (только цифры)")
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_admin_text_input: {e}")
-        bot.send_message(user_id, "❌ Произошла ошибка при обработке запроса")
+        logger.error(f"Ошибка в handle_admin_text_input: {e}")
+        safe_send_message(user_id, "❌ Произошла ошибка при обработке запроса")
 
 def show_admin_users(user_id):
     try:
         cursor = db_connection.cursor()
         cursor.execute('''
-            SELECT user_id, username, first_name, role, registration_date 
+            SELECT user_id, username, first_name, role, registration_date, is_admin
             FROM users 
             ORDER BY registration_date DESC 
             LIMIT 20
@@ -1066,16 +1085,17 @@ def show_admin_users(user_id):
         users_text = "👥 *Последние 20 пользователей*\n\n"
         
         for user in users:
-            user_id_db, username, first_name, role, reg_date = user
-            users_text += f"ID: {user_id_db} | @{username or 'нет'} | {role}\n"
+            user_id_db, username, first_name, role, reg_date, is_admin_flag = user
+            admin_status = " 👑" if is_admin_flag else ""
+            users_text += f"ID: {user_id_db} | @{username or 'нет'} | {role}{admin_status}\n"
         
         markup = types.InlineKeyboardMarkup()
         back_btn = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_back")
         markup.add(back_btn)
         
-        bot.send_message(user_id, users_text, reply_markup=markup, parse_mode="Markdown")
+        safe_send_message(user_id, users_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_admin_users: {e}")
+        logger.error(f"Ошибка в show_admin_users: {e}")
 
 def show_admin_applications(user_id):
     try:
@@ -1089,7 +1109,7 @@ def show_admin_applications(user_id):
         applications = cursor.fetchall()
         
         if not applications:
-            bot.send_message(user_id, "✅ Нет заявок, ожидающих рассмотрения.")
+            safe_send_message(user_id, "✅ Нет заявок, ожидающих рассмотрения.")
             return
         
         apps_text = "📋 *Заявки на рассмотрении*\n\n"
@@ -1107,9 +1127,9 @@ def show_admin_applications(user_id):
         back_btn = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_back")
         markup.add(back_btn)
         
-        bot.send_message(user_id, apps_text, reply_markup=markup, parse_mode="Markdown")
+        safe_send_message(user_id, apps_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_admin_applications: {e}")
+        logger.error(f"Ошибка в show_admin_applications: {e}")
 
 def show_admin_reviews(user_id):
     try:
@@ -1126,7 +1146,7 @@ def show_admin_reviews(user_id):
         reviews = cursor.fetchall()
         
         if not reviews:
-            bot.send_message(user_id, "✅ Нет отзывов на модерации.")
+            safe_send_message(user_id, "✅ Нет отзывов на модерации.")
             return
         
         reviews_text = "⭐ *Отзывы на модерации*\n\n"
@@ -1144,9 +1164,9 @@ def show_admin_reviews(user_id):
         back_btn = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_back")
         markup.add(back_btn)
         
-        bot.send_message(user_id, reviews_text, reply_markup=markup, parse_mode="Markdown")
+        safe_send_message(user_id, reviews_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_admin_reviews: {e}")
+        logger.error(f"Ошибка в show_admin_reviews: {e}")
 
 def show_admin_salary(user_id):
     try:
@@ -1160,7 +1180,7 @@ def show_admin_salary(user_id):
         employees = cursor.fetchall()
         
         if not employees:
-            bot.send_message(user_id, "❌ Нет сотрудников с назначенными ролями.")
+            safe_send_message(user_id, "❌ Нет сотрудников с назначенными ролями.")
             return
         
         salary_text = "💰 *УПРАВЛЕНИЕ ЗАРПЛАТАМИ*\n\n*Список сотрудников:*\n\n"
@@ -1180,9 +1200,9 @@ def show_admin_salary(user_id):
         back_btn = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_back")
         markup.add(back_btn)
         
-        bot.send_message(user_id, salary_text, reply_markup=markup, parse_mode="Markdown")
+        safe_send_message(user_id, salary_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_admin_salary: {e}")
+        logger.error(f"Ошибка в show_admin_salary: {e}")
 
 def show_admin_stats(user_id):
     try:
@@ -1228,17 +1248,17 @@ def show_admin_stats(user_id):
         back_btn = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_back")
         markup.add(back_btn)
         
-        bot.send_message(user_id, stats_text, reply_markup=markup, parse_mode="Markdown")
+        safe_send_message(user_id, stats_text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в show_admin_stats: {e}")
+        logger.error(f"Ошибка в show_admin_stats: {e}")
 
 def start_broadcast(user_id):
     try:
         session = get_session(user_id)
         session.set_state('ADMIN_BROADCAST')
-        bot.send_message(user_id, "📢 Введите сообщение для рассылки всем пользователям:")
+        safe_send_message(user_id, "📢 Введите сообщение для рассылки всем пользователям:")
     except Exception as e:
-        logger.error(f"❌ Ошибка в start_broadcast: {e}")
+        logger.error(f"Ошибка в start_broadcast: {e}")
 
 def handle_user_action(admin_id, action, target_user_id):
     try:
@@ -1249,9 +1269,9 @@ def handle_user_action(admin_id, action, target_user_id):
             
             if user_data:
                 username, first_name, role = user_data
-                bot.send_message(admin_id, f"👤 *Профиль пользователя*\n\nID: {target_user_id}\nИмя: {first_name}\nUsername: @{username or 'нет'}\nРоль: {role}", parse_mode="Markdown")
+                safe_send_message(admin_id, f"👤 *Профиль пользователя*\n\nID: {target_user_id}\nИмя: {first_name}\nUsername: @{username or 'нет'}\nРоль: {role}", parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_user_action: {e}")
+        logger.error(f"Ошибка в handle_user_action: {e}")
 
 def handle_application_action(admin_id, action, app_id):
     try:
@@ -1278,13 +1298,10 @@ def handle_application_action(admin_id, action, app_id):
                 cursor.execute('UPDATE users SET role = ? WHERE user_id = ?', (new_role, target_user_id))
                 
                 # Уведомляем пользователя
-                try:
-                    bot.send_message(target_user_id, f"🎉 Поздравляем! Ваша заявка на вакансию '{vacancy}' одобрена! Теперь ваша роль: {new_role}")
-                except:
-                    pass
+                safe_send_message(target_user_id, f"🎉 Поздравляем! Ваша заявка на вакансию '{vacancy}' одобрена! Теперь ваша роль: {new_role}")
             
             db_connection.commit()
-            bot.send_message(admin_id, f"✅ Заявка #{app_id} одобрена!")
+            safe_send_message(admin_id, f"✅ Заявка #{app_id} одобрена!")
         
         elif action == "reject":
             cursor.execute('UPDATE job_applications SET status = "rejected" WHERE id = ?', (app_id,))
@@ -1296,16 +1313,13 @@ def handle_application_action(admin_id, action, app_id):
             
             if app_data:
                 target_user_id, vacancy = app_data
-                try:
-                    bot.send_message(target_user_id, f"❌ К сожалению, ваша заявка на вакансию '{vacancy}' была отклонена.")
-                except:
-                    pass
+                safe_send_message(target_user_id, f"❌ К сожалению, ваша заявка на вакансию '{vacancy}' была отклонена.")
             
-            bot.send_message(admin_id, f"❌ Заявка #{app_id} отклонена!")
+            safe_send_message(admin_id, f"❌ Заявка #{app_id} отклонена!")
         
         show_admin_applications(admin_id)
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_application_action: {e}")
+        logger.error(f"Ошибка в handle_application_action: {e}")
 
 def handle_review_action(admin_id, action, review_id):
     try:
@@ -1314,16 +1328,16 @@ def handle_review_action(admin_id, action, review_id):
         if action == "approve":
             cursor.execute('UPDATE reviews SET status = "approved" WHERE id = ?', (review_id,))
             db_connection.commit()
-            bot.send_message(admin_id, f"✅ Отзыв #{review_id} одобрен!")
+            safe_send_message(admin_id, f"✅ Отзыв #{review_id} одобрен!")
         
         elif action == "reject":
             cursor.execute('DELETE FROM reviews WHERE id = ?', (review_id,))
             db_connection.commit()
-            bot.send_message(admin_id, f"❌ Отзыв #{review_id} удален!")
+            safe_send_message(admin_id, f"❌ Отзыв #{review_id} удален!")
         
         show_admin_reviews(admin_id)
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_review_action: {e}")
+        logger.error(f"Ошибка в handle_review_action: {e}")
 
 # Запуск бота
 def start_bot():
