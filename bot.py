@@ -6,8 +6,8 @@ import time
 import threading
 import schedule
 from datetime import datetime
-import json
 import logging
+import json
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация из переменных окружения
 TOKEN = os.environ.get('BOT_TOKEN', '8255905138:AAG6jeN13ZuAH3zUrSJWHVGFLE9pmpTLFd8')
-ADMIN_ID = 7607383500  # Твой ID админа
+ADMIN_ID = 7607383500
 MANAGER_USERNAME = '@Manager_molochniyshop'
 ADMIN_PASSWORD = "шуруп_спасибо_за_шавуху"
 
@@ -69,9 +69,10 @@ def init_db():
                 experience TEXT DEFAULT 'Нет опыта',
                 skills TEXT DEFAULT 'Не указаны',
                 last_payment_date TEXT,
-                performance_rating REAL DEFAULT 5.0,
-                contact_info TEXT DEFAULT 'Не указано',
-                is_admin INTEGER DEFAULT 0
+                rating REAL DEFAULT 0.0,
+                reviews_count INTEGER DEFAULT 0,
+                is_admin INTEGER DEFAULT 0,
+                contact_info TEXT DEFAULT 'Не указано'
             )
         ''')
         
@@ -138,10 +139,10 @@ def init_db():
         cursor.execute('INSERT OR IGNORE INTO users (user_id, is_admin, role) VALUES (?, 1, "admin")', (ADMIN_ID,))
         
         conn.commit()
-        logger.info("База данных успешно инициализирована")
+        logger.info("✅ База данных успешно инициализирована")
         return conn
     except Exception as e:
-        logger.error(f"Ошибка инициализации БД: {e}")
+        logger.error(f"❌ Ошибка инициализации БД: {e}")
         return None
 
 # Инициализация БД
@@ -161,8 +162,6 @@ class UserSession:
         self.state = state
         if data:
             self.data.update(data)
-        else:
-            self.data = {}
     
     def get_data(self, key=None):
         if key:
@@ -190,33 +189,6 @@ def is_admin(user_id):
     except:
         return False
 
-# Очистка сессий
-def cleanup_sessions():
-    try:
-        current_time = time.time()
-        expired_sessions = []
-        for user_id, session in user_sessions.items():
-            if current_time - session.created_at > 3600:
-                expired_sessions.append(user_id)
-        
-        for user_id in expired_sessions:
-            del user_sessions[user_id]
-    except Exception as e:
-        logger.error(f"Ошибка очистки сессий: {e}")
-
-def schedule_cleanup():
-    schedule.every(1).hours.do(cleanup_sessions)
-    while True:
-        try:
-            schedule.run_pending()
-            time.sleep(1)
-        except Exception as e:
-            time.sleep(60)
-
-cleanup_thread = threading.Thread(target=schedule_cleanup, daemon=True)
-cleanup_thread.start()
-
-# Вспомогательные функции
 def safe_notify_admin(message):
     try:
         safe_send_message(ADMIN_ID, message, parse_mode="Markdown")
@@ -253,15 +225,16 @@ def start_command(message):
             # Уведомление админу
             try:
                 ref_info = f" по реферальной ссылке от {referral_id}" if referral_id else " без реферальной ссылки"
-                safe_notify_admin(f"Новый пользователь: @{username or 'без username'} (ID: {user_id}){ref_info}")
+                safe_notify_admin(f"🆕 Новый пользователь: @{username or 'без username'} (ID: {user_id}){ref_info}")
             except Exception as e:
                 logger.error(f"Ошибка отправки уведомления админу: {e}")
         
         # Проверка "Я не робот"
         show_verification(user_id)
+        
     except Exception as e:
         logger.error(f"Ошибка в start_command: {e}")
-        safe_send_message(message.chat.id, "Произошла ошибка. Попробуйте позже.")
+        safe_send_message(message.chat.id, "❌ Произошла ошибка. Попробуйте позже.")
 
 def show_verification(user_id):
     try:
@@ -314,7 +287,7 @@ def callback_handler(call):
             if is_admin(user_id):
                 show_admin_panel(user_id)
             else:
-                bot.answer_callback_query(call.id, "У вас нет прав доступа")
+                bot.answer_callback_query(call.id, "❌ У вас нет прав доступа")
         elif call.data == "transfer_admin":
             start_transfer_admin(user_id)
         else:
@@ -323,7 +296,7 @@ def callback_handler(call):
     except Exception as e:
         logger.error(f"Ошибка в callback_handler: {e}")
         try:
-            bot.answer_callback_query(call.id, "Произошла ошибка")
+            bot.answer_callback_query(call.id, "❌ Произошла ошибка")
         except:
             pass
 
@@ -503,13 +476,13 @@ def show_user_profile(user_id):
         cursor = db_connection.cursor()
         cursor.execute('''
             SELECT username, first_name, last_name, role, registration_date, 
-                   total_earned, experience, skills, performance_rating, contact_info, is_admin
+                   total_earned, experience, skills, rating, reviews_count, contact_info, is_admin
             FROM users WHERE user_id = ?
         ''', (user_id,))
         user_data = cursor.fetchone()
         
         if user_data:
-            username, first_name, last_name, role, reg_date, total_earned, experience, skills, rating, contact_info, is_admin_flag = user_data
+            username, first_name, last_name, role, reg_date, total_earned, experience, skills, rating, reviews_count, contact_info, is_admin_flag = user_data
             
             profile_text = f"""👤 *Ваш профиль*
 
@@ -517,7 +490,8 @@ def show_user_profile(user_id):
 *Username:* @{username or 'Не указан'}
 *Роль:* {role or 'Пользователь'}
 *Дата регистрации:* {reg_date}
-*Рейтинг:* {rating or '5'}/5 ⭐"""
+*Рейтинг:* {rating:.1f}/5 ⭐
+*Количество отзывов:* {reviews_count}"""
 
             if is_admin_flag:
                 profile_text += "\n*Статус:* 👑 Администратор"
@@ -547,7 +521,7 @@ def show_user_profile(user_id):
             
             safe_send_message(user_id, profile_text, reply_markup=markup, parse_mode="Markdown")
         else:
-            safe_send_message(user_id, "Профиль не найден.")
+            safe_send_message(user_id, "❌ Профиль не найден.")
     except Exception as e:
         logger.error(f"Ошибка в show_user_profile: {e}")
 
@@ -558,7 +532,7 @@ def show_my_earnings(user_id):
         user_data = cursor.fetchone()
         
         if not user_data or user_data[0] == 'user':
-            safe_send_message(user_id, "У вас нет доступа к этой функции.")
+            safe_send_message(user_id, "❌ У вас нет доступа к этой функции.")
             return
         
         role, total_earned = user_data
@@ -620,7 +594,7 @@ def show_my_applications(user_id):
         applications = cursor.fetchall()
         
         if not applications:
-            safe_send_message(user_id, "У вас нет поданых заявок.")
+            safe_send_message(user_id, "📭 У вас нет поданых заявок.")
             return
         
         apps_text = "📋 *Ваши заявки*\n\n"
@@ -691,7 +665,7 @@ def start_review_process(user_id):
         employees = cursor.fetchall()
         
         if not employees:
-            safe_send_message(user_id, "В системе пока нет сотрудников для отзыва.")
+            safe_send_message(user_id, "❌ В системе пока нет сотрудников для отзыва.")
             return
         
         review_text = "👥 *Выберите сотрудника для отзыва:*\n\n"
@@ -810,21 +784,31 @@ def handle_messages(message):
             safe_send_message(user_id, "💬 *Напишите заключительное сообщение:*\n\n- Почему мы должны выбрать именно вас?", parse_mode="Markdown")
         
         elif session.state == 'APPLYING_FINAL':
+            # ИСПРАВЛЕНИЕ: Проверяем наличие vacancy в данных сессии
+            if 'vacancy' not in session.data:
+                safe_send_message(user_id, "❌ Ошибка: вакансия не найдена. Начните заново.")
+                session.clear()
+                show_main_menu(user_id)
+                return
+                
             application_text = text
-            data = session.get_data()
+            vacancy = session.data['vacancy']
+            experience = session.data['experience']
+            skills = session.data['skills']
+            about_me = session.data['about_me']
             
             # Сохраняем заявку
             cursor = db_connection.cursor()
             application_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cursor.execute(
                 'INSERT INTO job_applications (user_id, vacancy, experience, skills, about_me, application_text, application_date) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                (user_id, data['vacancy'], data['experience'], data['skills'], data['about_me'], application_text, application_date)
+                (user_id, vacancy, experience, skills, about_me, application_text, application_date)
             )
             db_connection.commit()
             
             # Обновляем профиль
             cursor.execute('UPDATE users SET experience = ?, skills = ? WHERE user_id = ?',
-                         (data['experience'], data['skills'], user_id))
+                         (experience, skills, user_id))
             db_connection.commit()
             
             # Уведомление админу
@@ -834,12 +818,12 @@ def handle_messages(message):
                 
                 app_notification = f"""📨 *НОВАЯ ЗАЯВКА НА ВАКАНСИЮ*
 
-*Вакансия:* {data['vacancy']}
+*Вакансия:* {vacancy}
 *Пользователь:* @{username} (ID: {user_id})
 
-*Опыт:* {data['experience'][:200]}...
-*Навыки:* {data['skills'][:200]}...
-*О себе:* {data['about_me'][:200]}...
+*Опыт:* {experience[:200]}...
+*Навыки:* {skills[:200]}...
+*О себе:* {about_me[:200]}...
 *Заключение:* {application_text[:200]}..."""
 
                 safe_notify_admin(app_notification)
@@ -847,7 +831,7 @@ def handle_messages(message):
                 logger.error(f"Ошибка отправки уведомления: {e}")
             
             session.clear()
-            safe_send_message(user_id, f"✅ Ваша заявка на вакансию *{data['vacancy']}* отправлена! Мы свяжемся с вами.", parse_mode="Markdown")
+            safe_send_message(user_id, f"✅ Ваша заявка на вакансию *{vacancy}* отправлена! Мы свяжемся с вами.", parse_mode="Markdown")
             show_main_menu(user_id)
         
         # Оставление отзыва
@@ -896,6 +880,7 @@ def handle_messages(message):
             
     except Exception as e:
         logger.error(f"Ошибка в handle_messages: {e}")
+        safe_send_message(message.chat.id, "❌ Произошла ошибка. Попробуйте позже.")
 
 # АДМИН ПАНЕЛЬ
 @bot.message_handler(commands=['admin'])
@@ -1327,6 +1312,26 @@ def handle_review_action(admin_id, action, review_id):
         
         if action == "approve":
             cursor.execute('UPDATE reviews SET status = "approved" WHERE id = ?', (review_id,))
+            
+            # Обновляем рейтинг пользователя
+            cursor.execute('SELECT target_user_id, rating FROM reviews WHERE id = ?', (review_id,))
+            review_data = cursor.fetchone()
+            
+            if review_data:
+                target_user_id, rating = review_data
+                
+                # Получаем текущий рейтинг и количество отзывов
+                cursor.execute('SELECT rating, reviews_count FROM users WHERE user_id = ?', (target_user_id,))
+                user_data = cursor.fetchone()
+                
+                if user_data:
+                    current_rating, current_count = user_data
+                    new_count = current_count + 1
+                    new_rating = ((current_rating * current_count) + rating) / new_count
+                    
+                    cursor.execute('UPDATE users SET rating = ?, reviews_count = ? WHERE user_id = ?',
+                                 (new_rating, new_count, target_user_id))
+            
             db_connection.commit()
             safe_send_message(admin_id, f"✅ Отзыв #{review_id} одобрен!")
         
