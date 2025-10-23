@@ -8,6 +8,7 @@ import schedule
 from datetime import datetime
 import logging
 import json
+from flask import Flask
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,7 +22,23 @@ ADMIN_PASSWORD = "шуруп_спасибо_за_шавуху"
 
 bot = telebot.TeleBot(TOKEN)
 
-# Сдельная система оплаты
+# Создаем Flask приложение для Render.com
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🤖 MOLOCHNIY BOTIK работает исправно! 🚀"
+
+@app.route('/health')
+def health():
+    return "✅ OK"
+
+# Запускаем Flask в отдельном потоке
+def run_flask():
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+# Система зарплат
 PIECE_RATE_SYSTEM = {
     'pr_manager': {'rate_per_view': 5, 'rate_per_client': 500, 'bonus_threshold': 10},
     'poster': {'rate_per_post': 300, 'rate_per_engagement': 50, 'quality_bonus': 200},
@@ -91,12 +108,6 @@ def safe_send_message(chat_id, text, reply_markup=None, parse_mode=None, cleanup
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения {chat_id}: {e}")
         return None
-
-def safe_edit_message(chat_id, message_id, text, reply_markup=None, parse_mode=None):
-    try:
-        bot.edit_message_text(text, chat_id, message_id, reply_markup=reply_markup, parse_mode=parse_mode)
-    except Exception as e:
-        logger.error(f"Ошибка редактирования сообщения: {e}")
 
 def safe_delete_message(chat_id, message_id):
     try:
@@ -172,7 +183,8 @@ def init_db():
             )
         ''')
         
-        cursor.execute('INSERT OR IGNORE INTO users (user_id, is_admin, role) VALUES (?, 1, "admin")', (ADMIN_ID,))
+        # УБЕДИТЕСЬ ЧТО АДМИН ДОБАВЛЕН В БАЗУ
+        cursor.execute('INSERT OR IGNORE INTO users (user_id, is_admin, role, username) VALUES (?, 1, "admin", "admin")', (ADMIN_ID,))
         
         conn.commit()
         logger.info("✅ База данных успешно инициализирована")
@@ -1317,6 +1329,11 @@ def handle_user_action_callback(call):
 def start_bot():
     logger.info("🤖 MOLOCHNIY BOTIK запускается...")
     
+    # Запускаем Flask в отдельном потоке
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("🌐 Flask сервер запущен в отдельном потоке")
+    
     # Очистка устаревших сессий
     def cleanup_sessions():
         while True:
@@ -1337,12 +1354,14 @@ def start_bot():
                 logger.error(f"Ошибка очистки сессий: {e}")
                 time.sleep(300)
     
-    threading.Thread(target=cleanup_sessions, daemon=True).start()
+    cleanup_thread = threading.Thread(target=cleanup_sessions, daemon=True)
+    cleanup_thread.start()
     
+    # Основной цикл бота
     while True:
         try:
             logger.info("✅ Бот успешно запущен и работает")
-            bot.polling(none_stop=True, timeout=20)
+            bot.polling(none_stop=True, timeout=60)
         except Exception as e:
             logger.error(f"❌ Ошибка в работе бота: {e}")
             logger.info("🔄 Перезапуск бота через 10 секунд...")
